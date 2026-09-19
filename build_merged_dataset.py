@@ -9,8 +9,8 @@ Usage:
   # 2. Mock Test with Upload to KhangTruong/Merged (cross_test split):
   python3 build_merged_dataset.py --mode mock --limit 10 --upload
 
-  # 3. Live Scout/Stream Run on real datasets (e.g. 10 samples each):
-  python3 build_merged_dataset.py --mode live --limit 10 --upload
+  # 3. Live Scout/Stream Run with SAGI-D (via Kaggle API) + CocoGlide:
+  python3 build_merged_dataset.py --mode live --limit 5 --datasets sagid cocoglide --upload
 
   # 4. Full Production Run (1,000 real and 1,000 fake per dataset):
   python3 build_merged_dataset.py --mode live --limit 1000 --upload
@@ -23,9 +23,11 @@ from typing import List
 from src.builder import DatasetBuilder
 from src.sources import (
     BaseDatasetSource,
+    BRGenSource,
     CocoGlideSource,
     MockDatasetSource,
     OpenSDIDSource,
+    SAGIDSource,
     TGIFSource,
 )
 from src.uploader import HubUploader
@@ -74,7 +76,13 @@ def parse_args():
         "--datasets",
         nargs="+",
         default=None,
-        help="Optional list of specific live datasets to include (e.g. cocoglide opensdid_flux opensdid_sd15 tgif)",
+        help="Optional list of specific datasets to include (e.g. sagid cocoglide opensdid_flux opensdid_sd15 tgif brgen)",
+    )
+    parser.add_argument(
+        "--brgen-dir",
+        type=str,
+        default=None,
+        help="Optional local path to unpacked BR-Gen directory (containing Au/, Tp/, Gt/)",
     )
     return parser.parse_args()
 
@@ -86,16 +94,20 @@ def get_mock_sources(limit: int) -> List[BaseDatasetSource]:
         MockDatasetSource("OpenSDID_SDXL", method="SDXL"),
         MockDatasetSource("CocoGlide", method="GLIDE"),
         MockDatasetSource("TGIF2_SD2", method="SD2_spliced"),
+        MockDatasetSource("SAGI-D", method="brushnet_epicrealism"),
+        MockDatasetSource("BR-Gen", method="PowerPaint"),
     ]
 
 
-def get_live_sources(filter_names: List[str] = None) -> List[BaseDatasetSource]:
+def get_live_sources(filter_names: List[str] = None, brgen_dir: str = None) -> List[BaseDatasetSource]:
     all_sources = [
+        SAGIDSource(),
         CocoGlideSource(),
         OpenSDIDSource(target_generator="Flux.1"),
         OpenSDIDSource(target_generator="SD1.5"),
         OpenSDIDSource(target_generator="SDXL"),
         TGIFSource(target_model="flux1dev"),
+        BRGenSource(data_dir=brgen_dir),
     ]
     if not filter_names:
         return all_sources
@@ -123,7 +135,7 @@ def main():
     if args.mode == "mock":
         sources = get_mock_sources(args.limit)
     else:
-        sources = get_live_sources(args.datasets)
+        sources = get_live_sources(args.datasets, brgen_dir=args.brgen_dir)
 
     print(f"Active sources ({len(sources)}):")
     for s in sources:
@@ -151,15 +163,22 @@ def main():
             methods_included.append(s._method)
         elif hasattr(s, "target_generator"):
             methods_included.append(s.target_generator)
-        elif hasattr(s, "target_model"):
+        elif hasattr(s, "target_model") and s.target_model:
             methods_included.append(s.target_model)
         elif "CocoGlide" in s.name:
             methods_included.append("GLIDE")
+        elif "SAGID" in s.name:
+            methods_included.extend(["brushnet", "powerpaint", "controlnet", "hdpainter"])
+        elif "BR-Gen" in s.name:
+            methods_included.extend(["PowerPaint", "BrushNet", "SDXL", "LaMa", "MAT"])
     methods_included.append("authentic")
 
     # 4. Upload if requested
     if args.upload:
-        total_samples = args.limit * 2 * len(sources)
+        # Read total rows from generated shards
+        import pyarrow.parquet as pq
+
+        total_samples = sum(len(pq.read_table(p)) for p in shard_paths)
         uploader = HubUploader(repo_id=args.repo)
         uploader.upload_shards(
             shard_paths=shard_paths,
