@@ -1,0 +1,3 @@
+category,image_id,width,height,prompt,bbox_512,num_inference_steps,guidance_scale,seed,orig_nima_mean,orig_nima_std,orig_giqa,orig_itm,orig_cos
+airplane,208901,1023,683,"airplane, A modern jet airplane flying up in the sky","[15, 10, 1008, 672]",5,0,1145441010,5.136071,1.5083134,-329.217348474454,0.2724609375,0.433349609375
+airplane,90631,1024,622,"airplane, A colorful fighter jet flying through a blue sky.","[0, 0, 1024, 608]",4,0,821827540,5.0055404,1.5246216,-344.0985839013756,0.234375,0.42138671875

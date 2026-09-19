@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+dist_data/
+.cache/
+*.parquet
+*.zip
+*.tar.gz
