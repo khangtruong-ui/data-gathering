@@ -2,8 +2,10 @@
 Dataset builder: aggregates records from multiple sources, enforces balance
 (1000 real / 1000 fake per dataset), and writes optimized Parquet shards.
 Includes TQDM progress bars for tracking real-time ingestion and serialization.
+Supports concurrent dataset streaming via ThreadPoolExecutor.
 """
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 from typing import List, Optional
 
@@ -55,9 +57,11 @@ class DatasetBuilder:
         target_real_per_dataset: int = 1000,
         target_fake_per_dataset: int = 1000,
         batch_size: int = 500,
+        max_workers: int = 4,
     ) -> List[str]:
         """
         Iterates over all sources, collects target records, and writes to Parquet shards.
+        Uses ThreadPoolExecutor for concurrent network IO when max_workers > 1.
         Returns list of generated shard filepaths.
         """
         print(f"\n=======================================================")
@@ -65,32 +69,59 @@ class DatasetBuilder:
         print(
             f"Target per dataset: {target_real_per_dataset} real, {target_fake_per_dataset} fake"
         )
+        print(f"Concurrency: {max_workers} worker threads")
         print(f"=======================================================\n")
 
         all_records: List[DataRecord] = []
 
-        for source in sources:
+        def _stream_source(pos: int, source: BaseDatasetSource) -> List[DataRecord]:
             source_real = 0
             source_fake = 0
             total_target = target_real_per_dataset + target_fake_per_dataset
+            records: List[DataRecord] = []
 
             with tqdm(
                 total=total_target,
                 desc=f"[{source.name}]",
                 unit="img",
+                position=pos,
+                leave=True,
                 dynamic_ncols=True,
             ) as pbar:
                 for record in source.stream_records(
                     target_real=target_real_per_dataset,
                     target_fake=target_fake_per_dataset,
                 ):
-                    all_records.append(record)
+                    records.append(record)
                     if record.label == 0:
                         source_real += 1
                     else:
                         source_fake += 1
                     pbar.update(1)
                     pbar.set_postfix({"real": source_real, "fake": source_fake})
+            return records
+
+        if max_workers and max_workers > 1 and len(sources) > 1:
+            print(
+                f"Streaming {len(sources)} sources concurrently using ThreadPoolExecutor(max_workers={max_workers})...\n"
+            )
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_idx = {
+                    executor.submit(_stream_source, idx, source): idx
+                    for idx, source in enumerate(sources)
+                }
+                results_by_idx = {}
+                for future in as_completed(future_to_idx):
+                    idx = future_to_idx[future]
+                    results_by_idx[idx] = future.result()
+
+                # Print blank lines so subsequent output doesn't overwrite tqdm rows
+                print("\n" * (len(sources) + 1))
+                for idx in sorted(results_by_idx.keys()):
+                    all_records.extend(results_by_idx[idx])
+        else:
+            for idx, source in enumerate(sources):
+                all_records.extend(_stream_source(idx, source))
 
         total_samples = len(all_records)
         print(f"\nTotal collected records across all datasets: {total_samples}")

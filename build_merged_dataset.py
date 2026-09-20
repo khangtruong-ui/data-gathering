@@ -84,6 +84,12 @@ def parse_args():
         default=None,
         help="Optional local path to unpacked BR-Gen directory (containing Au/, Tp/, Gt/)",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="Number of concurrent worker threads for streaming datasets (default: 4)",
+    )
     return parser.parse_args()
 
 
@@ -127,6 +133,7 @@ def main():
     print(f"Target split: {args.split}")
     print(f"Target repo:  {args.repo}")
     print(f"Limit/source: {args.limit} real, {args.limit} fake")
+    print(f"Workers:      {args.workers}")
     print(f"Upload:       {args.upload}")
     print(f"Output dir:   {args.output_dir}")
     print("=" * 60 + "\n")
@@ -149,6 +156,7 @@ def main():
         target_real_per_dataset=args.limit,
         target_fake_per_dataset=args.limit,
         batch_size=500,
+        max_workers=args.workers,
     )
 
     if not shard_paths:
