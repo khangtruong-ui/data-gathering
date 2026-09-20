@@ -113,10 +113,11 @@ class HubUploader:
         print(f"=======================================================\n")
 
         # 1. Upload parquet shards into data/
-        for p in shard_paths:
+        from tqdm import tqdm
+
+        for p in tqdm(shard_paths, desc="Uploading shards to Hugging Face", unit="shard", dynamic_ncols=True):
             fname = os.path.basename(p)
             remote_path = f"data/{fname}"
-            print(f"Uploading {fname} -> {remote_path}...")
             self.api.upload_file(
                 path_or_fileobj=p,
                 path_in_repo=remote_path,
