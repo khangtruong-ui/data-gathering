@@ -78,15 +78,32 @@ def create_black_mask_png(width: int, height: int) -> bytes:
     return header + ihdr + idat + iend
 
 
-def calculate_mask_ratio(mask_bytes: bytes) -> float:
+def calculate_mask_ratio(mask_bytes: bytes, threshold: int = 10) -> float:
     """
     Computes the ratio of non-zero (tampered) pixels in a mask.
     Returns a float between 0.0 (all authentic / black) and 1.0 (all tampered / white).
+    Uses Pillow to accurately decode JPEG, PNG, BMP masks and avoid compression noise.
     """
     if not mask_bytes or len(mask_bytes) < 8:
         return 0.0
 
-    # If PNG format
+    # 1. Primary: Fast and accurate PIL decoding
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(mask_bytes)) as img:
+            gray = img.convert("L")
+            hist = gray.histogram()
+            total_pixels = sum(hist)
+            if total_pixels == 0:
+                return 0.0
+            # Pixels > threshold are considered tampered (avoids JPEG 8x8 DCT compression noise near 0)
+            tampered = sum(hist[threshold + 1 :])
+            return float(tampered) / float(total_pixels)
+    except Exception:
+        pass
+
+    # 2. Fallback: Pure-Python PNG format parser
     if mask_bytes[:8] == b"\x89PNG\r\n\x1a\n":
         try:
             w, h, depth, ctype = struct.unpack(">IIBB", mask_bytes[16:26])
@@ -114,20 +131,18 @@ def calculate_mask_ratio(mask_bytes: bytes) -> float:
                 offset = y * stride + 1
                 line = raw[offset : offset + w * bpp]
                 if bpp == 1:
-                    non_zero += sum(1 for p in line if p > 0)
+                    non_zero += sum(1 for p in line if p > threshold)
                 else:
                     for i in range(0, len(line), bpp):
-                        if any(line[i : i + bpp]):
+                        if any(p > threshold for p in line[i : i + bpp]):
                             non_zero += 1
 
             return float(non_zero) / float(total_pixels) if total_pixels > 0 else 0.0
         except Exception:
-            # Fallback estimation based on raw byte values
-            non_zero = sum(1 for b in mask_bytes[32:] if b > 0)
-            return min(1.0, non_zero / max(1, len(mask_bytes) - 32))
+            pass
 
-    # General binary fallback
-    non_zero = sum(1 for b in mask_bytes if b > 0)
+    # 3. Final fallback estimation based on raw byte values
+    non_zero = sum(1 for b in mask_bytes if b > threshold)
     return min(1.0, non_zero / max(1, len(mask_bytes)))
 
 

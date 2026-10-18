@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
 """
-Main execution script for building and uploading the merged AI tampering dataset.
+Main execution script for building, managing disk/RAM safety, and uploading
+the merged AI tampering and manipulation localization dataset.
 
 Usage:
   # 1. Quick Mock Test (verifies pipeline, schema, and Parquet writing with synthetic records):
   python3 build_merged_dataset.py --mode mock --limit 10
 
-  # 2. Mock Test with Upload to KhangTruong/Merged (cross_test split):
-  python3 build_merged_dataset.py --mode mock --limit 10 --upload
+  # 2. Mock Test with Checkpoint Resume and Upload to KhangTruong/Tampered-Images-Combined-Dataset-2:
+  python3 build_merged_dataset.py --mode mock --limit 10 --upload --resume
 
-  # 3. Live Scout/Stream Run with SAGI-D (via Kaggle API) + CocoGlide:
-  python3 build_merged_dataset.py --mode live --limit 5 --datasets sagid cocoglide --upload
+  # 3. Live Stream with IMD2020 (HF Hub) and CocoGlide (Disk-Safe):
+  python3 build_merged_dataset.py --mode live --limit 5 --datasets imd2020 cocoglide --upload --delete-after-upload
 
-  # 4. Full Production Run (1,000 real and 1,000 fake per dataset):
-  python3 build_merged_dataset.py --mode live --limit 1000 --upload
+  # 4. Synchronize remote Hugging Face README documentation directly to match existing shards:
+  python3 build_merged_dataset.py --sync-doc
 """
 
 import argparse
+import collections
+import os
 import sys
 from typing import List
 
@@ -25,6 +28,7 @@ from src.sources import (
     BaseDatasetSource,
     BRGenSource,
     CocoGlideSource,
+    IMD2020Source,
     MockDatasetSource,
     OpenSDIDSource,
     SAGIDSource,
@@ -35,7 +39,7 @@ from src.uploader import HubUploader
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Build and upload multi-generator AI tampering dataset to KhangTruong/Merged"
+        description="Build and upload multi-generator AI tampering dataset to KhangTruong/Tampered-Images-Combined-Dataset-2"
     )
     parser.add_argument(
         "--mode",
@@ -58,25 +62,25 @@ def parse_args():
     parser.add_argument(
         "--repo",
         type=str,
-        default="KhangTruong/Merged",
+        default="KhangTruong/Tampered-Images-Combined-Dataset-2",
         help="Target Hugging Face dataset repository",
     )
     parser.add_argument(
         "--upload",
         action="store_true",
-        help="Whether to upload the generated shards and README to Hugging Face",
+        help="Whether to upload the generated shards and updated README to Hugging Face",
     )
     parser.add_argument(
         "--output-dir",
         type=str,
         default="dist_data",
-        help="Directory to save generated Parquet files",
+        help="Directory to save generated Parquet files and checkpoint.json",
     )
     parser.add_argument(
         "--datasets",
         nargs="+",
         default=None,
-        help="Optional list of specific datasets to include (e.g. sagid cocoglide opensdid_flux opensdid_sd15 tgif brgen)",
+        help="Optional list of specific datasets to include (e.g. imd2020 cocoglide sagid opensdid_flux opensdid_sd15 tgif brgen)",
     )
     parser.add_argument(
         "--brgen-dir",
@@ -90,6 +94,40 @@ def parse_args():
         default=4,
         help="Number of concurrent worker threads for streaming datasets (default: 4)",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        default=True,
+        help="Resume streaming from existing checkpoint.json if available (default: True)",
+    )
+    parser.add_argument(
+        "--no-resume",
+        action="store_false",
+        dest="resume",
+        help="Disable checkpoint resumption and start build from scratch",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=500,
+        help="Number of records per Parquet shard batch to prevent memory blowup (default: 500)",
+    )
+    parser.add_argument(
+        "--max-disk-gb",
+        type=float,
+        default=100.0,
+        help="Maximum allowable disk space threshold in GB before halting (default: 100.0)",
+    )
+    parser.add_argument(
+        "--delete-after-upload",
+        action="store_true",
+        help="Delete local Parquet shard files immediately after uploading to Hugging Face to save disk space",
+    )
+    parser.add_argument(
+        "--sync-doc",
+        action="store_true",
+        help="Inspect remote Hugging Face repository, clean up orphaned shards, and update README card directly",
+    )
     return parser.parse_args()
 
 
@@ -101,14 +139,16 @@ def get_mock_sources(limit: int) -> List[BaseDatasetSource]:
         MockDatasetSource("CocoGlide", method="GLIDE"),
         MockDatasetSource("TGIF2_SD2", method="SD2_spliced"),
         MockDatasetSource("SAGI-D", method="brushnet_epicrealism"),
+        MockDatasetSource("IMD2020", method="Inpainting"),
         MockDatasetSource("BR-Gen", method="PowerPaint"),
     ]
 
 
 def get_live_sources(filter_names: List[str] = None, brgen_dir: str = None) -> List[BaseDatasetSource]:
     all_sources = [
-        SAGIDSource(),
         CocoGlideSource(),
+        IMD2020Source(split="test"),
+        SAGIDSource(),
         OpenSDIDSource(target_generator="Flux.1"),
         OpenSDIDSource(target_generator="SD1.5"),
         OpenSDIDSource(target_generator="SDXL"),
@@ -129,13 +169,24 @@ def main():
     print("\n" + "=" * 60)
     print("AI IMAGE TAMPERING DATASET MERGER & BUILDER")
     print("=" * 60)
-    print(f"Mode:         {args.mode}")
-    print(f"Target split: {args.split}")
-    print(f"Target repo:  {args.repo}")
-    print(f"Limit/source: {args.limit} real, {args.limit} fake")
-    print(f"Workers:      {args.workers}")
-    print(f"Upload:       {args.upload}")
-    print(f"Output dir:   {args.output_dir}")
+    print(f"Target repo:         {args.repo}")
+    print(f"Target split:        {args.split}")
+    print(f"Output directory:    {args.output_dir}")
+    print(f"Max disk ceiling:    {args.max_disk_gb} GB")
+    print(f"Resume checkpoint:   {args.resume}")
+    print(f"Delete after upload: {args.delete_after_upload}")
+
+    # Synchronize documentation directly if requested
+    if args.sync_doc:
+        print("\nMode: Synchronize remote Hugging Face documentation only.")
+        uploader = HubUploader(repo_id=args.repo)
+        uploader.sync_hf_repo_documentation(split_name=args.split, remove_orphaned_shards=True)
+        return
+
+    print(f"Mode:                {args.mode}")
+    print(f"Limit/source:        {args.limit} real, {args.limit} fake")
+    print(f"Workers:             {args.workers}")
+    print(f"Upload:              {args.upload}")
     print("=" * 60 + "\n")
 
     # 1. Setup sources
@@ -144,60 +195,76 @@ def main():
     else:
         sources = get_live_sources(args.datasets, brgen_dir=args.brgen_dir)
 
-    print(f"Active sources ({len(sources)}):")
+    print(f"Configured sources ({len(sources)}):")
     for s in sources:
         print(f"  - {s.name}")
 
+    uploader = HubUploader(repo_id=args.repo) if args.upload else None
+
+    # Setup uploader callback if continuous uploading is desired
+    uploader_callback = None
+    if args.upload:
+        def _on_shard_written(shard_path: str):
+            print(f"  [Auto-Upload] Committing shard {os.path.basename(shard_path)} to {args.repo}...")
+            uploader.upload_single_shard(shard_path, split_name=args.split)
+        uploader_callback = _on_shard_written
+
     # 2. Build dataset
-    builder = DatasetBuilder(output_dir=args.output_dir)
+    builder = DatasetBuilder(output_dir=args.output_dir, max_disk_gb=args.max_disk_gb)
     shard_paths = builder.build_split(
         sources=sources,
         split_name=args.split,
         target_real_per_dataset=args.limit,
         target_fake_per_dataset=args.limit,
-        batch_size=500,
+        batch_size=args.batch_size,
         max_workers=args.workers,
+        resume=args.resume,
+        uploader_callback=uploader_callback,
+        delete_after_upload=args.delete_after_upload,
     )
 
     if not shard_paths:
-        print("Error: No shards generated. Exiting.")
-        sys.exit(1)
+        print("Notice: No new shards generated.")
 
-    # 3. Collect summary statistics
-    datasets_included = [s.name for s in sources]
-    methods_included = []
-    for s in sources:
-        if hasattr(s, "_method"):
-            methods_included.append(s._method)
-        elif hasattr(s, "target_generator"):
-            methods_included.append(s.target_generator)
-        elif hasattr(s, "target_model") and s.target_model:
-            methods_included.append(s.target_model)
-        elif "CocoGlide" in s.name:
-            methods_included.append("GLIDE")
-        elif "SAGID" in s.name:
-            methods_included.extend(["brushnet", "powerpaint", "controlnet", "hdpainter"])
-        elif "BR-Gen" in s.name:
-            methods_included.extend(["PowerPaint", "BrushNet", "SDXL", "LaMa", "MAT"])
-    methods_included.append("authentic")
+    # 3. Compute verified statistics from checkpoint / shards
+    checkpoint = builder.load_checkpoint()
+    datasets_distribution = collections.Counter()
+    methods_distribution = collections.Counter()
+    total_samples = 0
 
-    # 4. Upload if requested
-    if args.upload:
-        # Read total rows from generated shards
+    if checkpoint and "completed_shards" in checkpoint:
+        for s in checkpoint["completed_shards"]:
+            total_samples += s.get("num_rows", 0)
+            datasets_distribution.update(s.get("datasets", {}))
+            methods_distribution.update(s.get("methods", {}))
+    elif shard_paths:
         import pyarrow.parquet as pq
+        for p in shard_paths:
+            if os.path.exists(p):
+                t = pq.read_table(p, columns=["dataset", "method"])
+                total_samples += len(t)
+                datasets_distribution.update(t["dataset"].to_pylist())
+                methods_distribution.update(t["method"].to_pylist())
 
-        total_samples = sum(len(pq.read_table(p)) for p in shard_paths)
-        uploader = HubUploader(repo_id=args.repo)
-        uploader.upload_shards(
-            shard_paths=shard_paths,
+    print(f"\nFinal Verified Ingestion Summary ({total_samples:,} Total Samples):")
+    for d, c in sorted(datasets_distribution.items()):
+        print(f"  - Dataset {d}: {c:,} samples")
+    for m, c in sorted(methods_distribution.items()):
+        print(f"  - Method {m}: {c:,} samples")
+
+    # 4. Finalize README update if upload enabled
+    if args.upload and uploader:
+        print("\nUpdating remote dataset card on Hugging Face...")
+        uploader.update_dataset_card(
             split_name=args.split,
             total_samples=total_samples,
-            datasets_included=datasets_included,
-            methods_included=methods_included,
+            datasets_distribution=dict(datasets_distribution),
+            methods_distribution=dict(methods_distribution),
         )
+        print(f"Upload and document synchronization complete: https://huggingface.co/datasets/{args.repo}")
     else:
         print("\nSkipping upload (use --upload to push to Hugging Face).")
-        print(f"Generated shards available locally in: {args.output_dir}/")
+        print(f"Local shards and checkpoint available in: {args.output_dir}/")
 
 
 if __name__ == "__main__":
