@@ -127,6 +127,56 @@ class TestDatasetPipeline(unittest.TestCase):
         # Check that IMD2020 has link to KhangTruong/IMD2020
         self.assertIn("https://huggingface.co/datasets/KhangTruong/IMD2020", card)
 
+    def test_downloader_catalog_and_disk_safety(self):
+        from src.downloader import DATASET_DOWNLOAD_CATALOG, check_disk_safety
+
+        self.assertIn("standard_bundle", DATASET_DOWNLOAD_CATALOG)
+        self.assertIn("casia1", DATASET_DOWNLOAD_CATALOG)
+        self.assertIn("casia2", DATASET_DOWNLOAD_CATALOG)
+        self.assertIn("columbia", DATASET_DOWNLOAD_CATALOG)
+        self.assertIn("coverage", DATASET_DOWNLOAD_CATALOG)
+        self.assertIn("nist16", DATASET_DOWNLOAD_CATALOG)
+        self.assertIn("autosplice", DATASET_DOWNLOAD_CATALOG)
+        self.assertIn("hifi_ifdl", DATASET_DOWNLOAD_CATALOG)
+
+        # Safety check with normal limit passes
+        check_disk_safety(self.test_dir, estimated_gb=0.1, max_limit_gb=100.0)
+
+        # Safety check with tight limit raises RuntimeError
+        with self.assertRaises(RuntimeError):
+            check_disk_safety(self.test_dir, estimated_gb=2000.0, max_limit_gb=100.0)
+
+    def test_sources_interface_instantiation(self):
+        from src.sources import (
+            AutoSpliceSource,
+            CasiaSource,
+            CocoInpaintSource,
+            ColumbiaSource,
+            CoverageSource,
+            HiFiIFDLSource,
+            IMD2020RealLifeSource,
+            IMD2020Source,
+            NIST16Source,
+        )
+
+        sources = [
+            CasiaSource(version="v1", data_dir="/tmp/dummy"),
+            CasiaSource(version="v2", data_dir="/tmp/dummy"),
+            ColumbiaSource(data_dir="/tmp/dummy"),
+            CoverageSource(data_dir="/tmp/dummy"),
+            NIST16Source(data_dir="/tmp/dummy"),
+            IMD2020Source(split="test"),
+            IMD2020RealLifeSource(data_dir="/tmp/dummy"),
+            CocoInpaintSource(),
+            AutoSpliceSource(data_dir="/tmp/dummy"),
+            HiFiIFDLSource(data_dir="/tmp/dummy"),
+        ]
+
+        for s in sources:
+            self.assertTrue(len(s.name) > 0)
+            self.assertTrue(hasattr(s, "stream_records"))
+
 
 if __name__ == "__main__":
     unittest.main()
+

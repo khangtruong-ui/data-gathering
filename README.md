@@ -92,25 +92,47 @@ Below is the comprehensive accessibility and download source matrix for investig
 
 ## 6. Quickstart & Usage
 
-### 1. Mock Test (Zero Bandwidth Dry Run with Checkpoint)
-Runs synthetic mock generators across all dataset sources to verify schema, Parquet serialization, and checkpointing:
+### 1. Automated Dataset Downloading (`download_datasets.py`)
+Download and unpack any benchmark dataset directly with disk safety controls (automatic archive cleanup, 100GB ceiling):
+```bash
+# List all supported downloadable benchmarks
+python3 download_datasets.py --list
+
+# Download the standard 5-dataset benchmark bundle (Columbia, Coverage, CASIA1, CASIA2, NIST16, IMD2020):
+python3 download_datasets.py --datasets standard_bundle
+
+# Download individual datasets:
+python3 download_datasets.py --datasets casia1 coverage columbia autosplice
+
+# Download to custom folder with strict 50GB disk ceiling:
+python3 download_datasets.py --datasets cocoglide imd2020_inpainting --target-dir /data/datasets --max-disk-gb 50
+```
+
+### 2. Mock Test (Zero Bandwidth Dry Run with Checkpoint)
+Runs synthetic mock generators across all 17 dataset sources to verify schema, Parquet serialization, and checkpointing:
 ```bash
 python3 build_merged_dataset.py --mode mock --limit 10
 ```
 
-### 2. Live Run with IMD2020 (HF Hub) and CocoGlide (Zero Disk Accumulation)
+### 3. Live Run with IMD2020 (HF Hub), COCO-Inpaint, and CocoGlide (Zero Disk Accumulation)
 Streams real inpainting pairs directly and uploads to Hugging Face, deleting local shards as soon as they are uploaded:
 ```bash
-python3 build_merged_dataset.py --mode live --datasets imd2020 cocoglide --limit 100 --upload --delete-after-upload
+python3 build_merged_dataset.py --mode live --datasets imd2020 cocoinpaint cocoglide --limit 100 --upload --delete-after-upload
 ```
 
-### 3. Production Ingestion with Checkpoint Resumption
+### 4. Live Run with Downloaded Benchmarks (CASIA, Coverage, Columbia, NIST16)
+Ingests locally prepared or on-demand downloaded benchmark datasets:
+```bash
+python3 build_merged_dataset.py --mode live --datasets casia1 columbia coverage nist16 --limit 500
+```
+
+### 5. Production Ingestion with Checkpoint Resumption
 Streams up to 1,000 real and 1,000 fake images per source with strict 100GB disk ceiling and automatic checkpointing:
 ```bash
 python3 build_merged_dataset.py --mode live --limit 1000 --max-disk-gb 100 --resume --upload
 ```
 
-### 4. Synchronize Remote Dataset Documentation
+### 6. Synchronize Remote Dataset Documentation
 Inspects the remote Hugging Face repository, cleans up any orphaned shards, and updates the README dataset card with true row counts and accessibility metadata:
 ```bash
 python3 build_merged_dataset.py --sync-doc
@@ -121,3 +143,4 @@ python3 build_merged_dataset.py --sync-doc
 ## 7. Remote Dataset Hub
 The benchmark dataset is hosted at:
 **[https://huggingface.co/datasets/KhangTruong/Tampered-Images-Combined-Dataset-2](https://huggingface.co/datasets/KhangTruong/Tampered-Images-Combined-Dataset-2)**
+

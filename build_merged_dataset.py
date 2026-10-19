@@ -25,16 +25,25 @@ from typing import List
 
 from src.builder import DatasetBuilder
 from src.sources import (
+    AutoSpliceSource,
     BaseDatasetSource,
     BRGenSource,
+    CasiaSource,
     CocoGlideSource,
+    CocoInpaintSource,
+    ColumbiaSource,
+    CoverageSource,
+    HiFiIFDLSource,
+    IMD2020RealLifeSource,
     IMD2020Source,
     MockDatasetSource,
+    NIST16Source,
     OpenSDIDSource,
     SAGIDSource,
     TGIFSource,
 )
 from src.uploader import HubUploader
+
 
 
 def parse_args():
@@ -140,6 +149,15 @@ def get_mock_sources(limit: int) -> List[BaseDatasetSource]:
         MockDatasetSource("TGIF2_SD2", method="SD2_spliced"),
         MockDatasetSource("SAGI-D", method="brushnet_epicrealism"),
         MockDatasetSource("IMD2020", method="Inpainting"),
+        MockDatasetSource("IMD2020_RealLife", method="RealLife_Manipulation"),
+        MockDatasetSource("CASIA_V1", method="Splicing"),
+        MockDatasetSource("CASIA_V2", method="Splicing"),
+        MockDatasetSource("Columbia_Gray", method="Splicing"),
+        MockDatasetSource("Coverage", method="CopyMove"),
+        MockDatasetSource("NIST16", method="Splicing"),
+        MockDatasetSource("COCO_Inpaint", method="Inpainting"),
+        MockDatasetSource("AutoSplice", method="DALL-E2"),
+        MockDatasetSource("HiFi_IFDL", method="Hierarchical_Forgery"),
         MockDatasetSource("BR-Gen", method="PowerPaint"),
     ]
 
@@ -148,6 +166,15 @@ def get_live_sources(filter_names: List[str] = None, brgen_dir: str = None) -> L
     all_sources = [
         CocoGlideSource(),
         IMD2020Source(split="test"),
+        IMD2020RealLifeSource(),
+        CasiaSource(version="v1"),
+        CasiaSource(version="v2"),
+        ColumbiaSource(),
+        CoverageSource(),
+        NIST16Source(),
+        CocoInpaintSource(),
+        AutoSpliceSource(),
+        HiFiIFDLSource(),
         SAGIDSource(),
         OpenSDIDSource(target_generator="Flux.1"),
         OpenSDIDSource(target_generator="SD1.5"),
@@ -158,9 +185,13 @@ def get_live_sources(filter_names: List[str] = None, brgen_dir: str = None) -> L
     if not filter_names:
         return all_sources
 
-    filter_lower = [f.lower() for f in filter_names]
-    selected = [s for s in all_sources if any(k in s.name.lower() for k in filter_lower)]
+    filter_lower = [f.lower().replace("-", "").replace("_", "") for f in filter_names]
+    selected = [
+        s for s in all_sources
+        if any(k in s.name.lower().replace("-", "").replace("_", "") for k in filter_lower)
+    ]
     return selected if selected else all_sources
+
 
 
 def main():
