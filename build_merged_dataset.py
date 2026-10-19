@@ -185,10 +185,13 @@ def get_live_sources(filter_names: List[str] = None, brgen_dir: str = None) -> L
     if not filter_names:
         return all_sources
 
-    filter_lower = [f.lower().replace("-", "").replace("_", "") for f in filter_names]
+    def _norm(txt: str) -> str:
+        return txt.lower().replace("-", "").replace("_", "").replace("v", "")
+
+    filter_norm = [_norm(f) for f in filter_names]
     selected = [
         s for s in all_sources
-        if any(k in s.name.lower().replace("-", "").replace("_", "") for k in filter_lower)
+        if any(k in _norm(s.name) or _norm(s.name) in k for k in filter_norm)
     ]
     return selected if selected else all_sources
 

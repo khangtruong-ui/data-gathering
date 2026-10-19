@@ -49,28 +49,34 @@ class NIST16Source(BaseDatasetSource):
         yielded_fake = 0
         yielded_real = 0
 
-        # NIST16 typically has 'alllist.txt' with pairs of 'image mask' or folders
+        # NIST16 has 'alllist.txt' with pairs of 'probe/<id>.jpg mask/<id>.png' for tampered images
+        # Remaining images in probe/ are authentic (pristine) images
         list_file = os.path.join(self.data_dir, "alllist.txt")
         pairs = []
+        fake_probes = set()
 
         if os.path.exists(list_file):
             with open(list_file, "r") as f:
                 for line in f:
                     parts = line.strip().split()
                     if len(parts) >= 2:
-                        pairs.append((os.path.join(self.data_dir, parts[0]), os.path.join(self.data_dir, parts[1])))
+                        img_rel, mask_rel = parts[0], parts[1]
+                        fake_probes.add(os.path.basename(img_rel))
+                        pairs.append((os.path.join(self.data_dir, img_rel), os.path.join(self.data_dir, mask_rel)))
         else:
             # Fallback file traversal
             for root, _, files in os.walk(self.data_dir):
                 for f in files:
-                    if f.lower().endswith((".jpg", ".png", ".tif")) and not "mask" in f.lower():
+                    if f.lower().endswith((".jpg", ".png", ".tif")) and "mask" not in f.lower():
                         base = os.path.splitext(f)[0]
                         mask_cand = os.path.join(root, f"{base}_mask.png")
                         if os.path.exists(mask_cand):
+                            fake_probes.add(f)
                             pairs.append((os.path.join(root, f), mask_cand))
 
+        # 1. Process fake records
         for img_path, mask_path in pairs:
-            if yielded_fake >= target_fake and yielded_real >= target_real:
+            if yielded_fake >= target_fake:
                 break
             if not os.path.exists(img_path):
                 continue
@@ -82,14 +88,12 @@ class NIST16Source(BaseDatasetSource):
                 with open(img_path, "rb") as f:
                     img_bytes = f.read()
 
-                # Process fake
-                if os.path.exists(mask_path) and yielded_fake < target_fake:
+                if os.path.exists(mask_path):
                     with open(mask_path, "rb") as f:
                         mask_bytes = f.read()
 
                     ratio = calculate_mask_ratio(mask_bytes)
                     if 0.0005 <= ratio <= 0.95:
-                        # Determine method (splice, removal, manipulation)
                         m_lower = mask_path.lower()
                         method = "Splicing" if "splice" in m_lower else ("Removal" if "remove" in m_lower else "Manipulation")
 
@@ -106,9 +110,25 @@ class NIST16Source(BaseDatasetSource):
                             mask_ratio=ratio,
                         )
                         yielded_fake += 1
+            except Exception:
+                continue
 
-                # Process real
-                if yielded_real < target_real and yielded_real < yielded_fake:
+        # 2. Process authentic records from genuine unmanipulated probes
+        probe_dir = os.path.join(self.data_dir, "probe")
+        if os.path.exists(probe_dir):
+            for fname in sorted(os.listdir(probe_dir)):
+                if yielded_real >= target_real:
+                    break
+                if fname in fake_probes or not fname.lower().endswith((".jpg", ".png")):
+                    continue
+
+                img_path = os.path.join(probe_dir, fname)
+                base_name, _ = os.path.splitext(fname)
+
+                try:
+                    with open(img_path, "rb") as f:
+                        img_bytes = f.read()
+
                     w, h = get_image_dimensions(img_bytes)
                     black_mask = create_black_mask_png(w, h)
 
@@ -125,7 +145,7 @@ class NIST16Source(BaseDatasetSource):
                         mask_ratio=0.0,
                     )
                     yielded_real += 1
-            except Exception:
-                continue
+                except Exception:
+                    continue
 
         print(f"[{self.name}] Completed: {yielded_real} real, {yielded_fake} fake.")

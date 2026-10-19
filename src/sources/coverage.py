@@ -72,8 +72,10 @@ class CoverageSource(BaseDatasetSource):
             base_name, _ = os.path.splitext(fname)
 
             # In COVERAGE:
-            # e.g., '1forged.tif' is tampered, '1t.tif' is authentic original
-            is_forged = "forged" in fname.lower() or fname.lower().endswith("f.tif")
+            # e.g., '1t.tif' is forged copy-move image, '1.tif' is authentic original
+            # mask is '1forged.tif' in mask/
+            is_forged = base_name.endswith("t") or "forged" in fname.lower()
+            mask_base = base_name[:-1] if base_name.endswith("t") else base_name
 
             try:
                 with open(img_path, "rb") as f:
@@ -84,6 +86,8 @@ class CoverageSource(BaseDatasetSource):
                     mask_path = None
                     if os.path.exists(mask_dir):
                         candidates = [
+                            os.path.join(mask_dir, f"{mask_base}forged.tif"),
+                            os.path.join(mask_dir, f"{mask_base}forged.png"),
                             os.path.join(mask_dir, fname),
                             os.path.join(mask_dir, f"{base_name}_mask.png"),
                             os.path.join(mask_dir, f"{base_name}.png"),
