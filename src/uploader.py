@@ -357,6 +357,139 @@ class HubUploader:
         )
         print(f"\nSuccessfully updated dataset at https://huggingface.co/datasets/{self.repo_id}!")
 
+    def _cleanup_legacy_shards(self, split_name: str, shards: List[str]) -> List[str]:
+        """
+        Cleans up legacy '-of-' shards if standard indexed shards ('{split_name}-{idx:05d}.parquet') exist,
+        or reconciles mismatched '-of-' shard sets.
+        """
+        from huggingface_hub import CommitOperationDelete
+
+        indexed_shards = [s for s in shards if "-of-" not in s]
+        multi_shards = [s for s in shards if "-of-" in s]
+
+        to_delete = []
+        if indexed_shards and multi_shards:
+            # Standard DatasetBuilder shards are present; any '-of-' shards are legacy orphans
+            to_delete = multi_shards
+            print(
+                f"[Sync] Found {len(indexed_shards)} active indexed shards and "
+                f"{len(multi_shards)} legacy '-of-' shards. Removing legacy shards..."
+            )
+        elif multi_shards:
+            denoms = collections.Counter()
+            for s in multi_shards:
+                parts = s.split("-of-")
+                if len(parts) == 2:
+                    denom = parts[1].split(".")[0]
+                    denoms[denom] += 1
+            target_denom = denoms.most_common(1)[0][0]
+            to_delete = [s for s in shards if target_denom and f"-of-{target_denom}.parquet" not in s]
+
+        if to_delete:
+            try:
+                ops = [CommitOperationDelete(path_in_repo=s) for s in to_delete]
+                self.api.create_commit(
+                    repo_id=self.repo_id,
+                    repo_type="dataset",
+                    operations=ops,
+                    commit_message=f"Remove {len(to_delete)} orphaned/legacy Parquet shards for {split_name}",
+                )
+                print(f"[Sync] Deleted {len(to_delete)} orphaned shards from {self.repo_id}.")
+            except Exception as e:
+                print(f"[Sync] Warning: batch delete failed ({e}), attempting individual deletes...")
+                for s in to_delete:
+                    try:
+                        self.api.delete_file(
+                            path_in_repo=s,
+                            repo_id=self.repo_id,
+                            repo_type="dataset",
+                            commit_message=f"Remove orphaned shard {s}",
+                        )
+                    except Exception as inner_e:
+                        print(f"[Sync] Could not delete {s}: {inner_e}")
+
+            files = self.get_remote_repo_files()
+            shards = sorted([f for f in files if f.startswith(f"data/{split_name}-") and f.endswith(".parquet")])
+
+        return shards
+
+    def reconstruct_checkpoint_from_hub(
+        self,
+        split_name: str = "cross_test",
+        output_dir: str = "dist_data",
+        target_real: int = 2000,
+        target_fake: int = 2000,
+        remove_orphaned_shards: bool = True,
+    ) -> Optional[dict]:
+        """
+        Inspects existing Parquet shards on the remote Hugging Face repository and reconstructs
+        a local checkpoint structure so '--resume' can seamlessly append new shards without
+        re-downloading or duplicating datasets already uploaded to the Hub.
+        """
+        import fsspec
+
+        files = self.get_remote_repo_files()
+        shards = sorted([f for f in files if f.startswith(f"data/{split_name}-") and f.endswith(".parquet")])
+        if not shards:
+            return None
+
+        if remove_orphaned_shards:
+            shards = self._cleanup_legacy_shards(split_name, shards)
+
+        indexed_shards = [s for s in shards if "-of-" not in s]
+        if not indexed_shards:
+            return None
+
+        print(f"[Resume-Sync] Reconstructing checkpoint from {len(indexed_shards)} remote shards on {self.repo_id}...")
+        fs = fsspec.filesystem("http")
+        completed_shards = []
+        source_progress: Dict[str, dict] = {}
+        total_samples = 0
+
+        for shard in indexed_shards:
+            fname = os.path.basename(shard)
+            url = f"https://huggingface.co/datasets/{self.repo_id}/resolve/main/{shard}"
+            with fs.open(url, "rb") as f:
+                pf = pq.ParquetFile(f)
+                num_rows = pf.metadata.num_rows
+                t = pf.read(columns=["dataset", "method", "label"])
+                ds_list = t["dataset"].to_pylist()
+                m_list = t["method"].to_pylist()
+                lbl_list = t["label"].to_pylist()
+
+            ds_counts = dict(collections.Counter(ds_list))
+            m_counts = dict(collections.Counter(m_list))
+            for d, l in zip(ds_list, lbl_list):
+                norm_d = d.replace(".", "").replace("-", "")
+                for key in {d, norm_d}:
+                    if key not in source_progress:
+                        source_progress[key] = {"real": 0, "fake": 0, "completed": True}
+                    if l == 0:
+                        source_progress[key]["real"] += 1
+                    else:
+                        source_progress[key]["fake"] += 1
+
+            completed_shards.append(
+                {
+                    "filename": fname,
+                    "path": os.path.join(output_dir, fname),
+                    "num_rows": num_rows,
+                    "datasets": ds_counts,
+                    "methods": m_counts,
+                    "uploaded": True,
+                }
+            )
+            total_samples += num_rows
+
+        return {
+            "split_name": split_name,
+            "target_real": target_real,
+            "target_fake": target_fake,
+            "completed_shards": completed_shards,
+            "source_progress": source_progress,
+            "total_samples": total_samples,
+        }
+
     def sync_hf_repo_documentation(self, split_name: str = "cross_test", remove_orphaned_shards: bool = True):
         """
         Inspects the remote Hugging Face repository, cleans up any orphaned/mock shards,
@@ -371,35 +504,8 @@ class HubUploader:
         shards = sorted([f for f in files if f.startswith(f"data/{split_name}-") and f.endswith(".parquet")])
         print(f"[Sync] Found {len(shards)} Parquet shards for split '{split_name}'.")
 
-        # If there's an orphaned single-file shard alongside multi-shard set (e.g. 00000-of-00001 with 00000-of-00019)
-        multi_shards = [s for s in shards if "-of-" in s]
-        if multi_shards and remove_orphaned_shards:
-            denoms = collections.Counter()
-            for s in multi_shards:
-                parts = s.split("-of-")
-                if len(parts) == 2:
-                    denom = parts[1].split(".")[0]
-                    denoms[denom] += 1
-
-            target_denom = denoms.most_common(1)[0][0]
-            print(f"[Sync] Shard set denominator identified: {target_denom} ({denoms[target_denom]} shards)")
-
-            for s in shards:
-                if target_denom and f"-of-{target_denom}.parquet" not in s:
-                    print(f"[Sync] Identified orphaned shard: {s}. Removing from Hub...")
-                    try:
-                        self.api.delete_file(
-                            path_in_repo=s,
-                            repo_id=self.repo_id,
-                            repo_type="dataset",
-                            commit_message=f"Remove orphaned shard {s} to resolve data-document mismatch",
-                        )
-                    except Exception as e:
-                        print(f"[Sync] Could not delete orphaned shard {s}: {e}")
-
-            # Re-fetch file list after cleanup
-            files = self.get_remote_repo_files()
-            shards = sorted([f for f in files if f.startswith(f"data/{split_name}-") and f.endswith(".parquet")])
+        if remove_orphaned_shards and shards:
+            shards = self._cleanup_legacy_shards(split_name, shards)
 
         fs = fsspec.filesystem("http")
         dataset_counter = collections.Counter()

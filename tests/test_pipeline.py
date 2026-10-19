@@ -176,6 +176,37 @@ class TestDatasetPipeline(unittest.TestCase):
             self.assertTrue(len(s.name) > 0)
             self.assertTrue(hasattr(s, "stream_records"))
 
+    def test_hifi_tar_streaming(self):
+        import tarfile
+        from src.sources.hifi import HiFiIFDLSource
+
+        tar_path = os.path.join(self.test_dir, "FaShifter.tar.gz")
+        img_buf = io.BytesIO()
+        Image.new("RGB", (64, 64), (120, 80, 60)).save(img_buf, format="PNG")
+        img_bytes = img_buf.getvalue()
+
+        mask_img = Image.new("L", (64, 64), 0)
+        for y in range(16, 48):
+            for x in range(16, 48):
+                mask_img.putpixel((x, y), 255)
+        mask_buf = io.BytesIO()
+        mask_img.save(mask_buf, format="PNG")
+        mask_bytes = mask_buf.getvalue()
+
+        with tarfile.open(tar_path, "w:gz") as tf:
+            for name, payload in [("FaShifter/001_002_0001.png", img_bytes), ("FaShifter/001_002_0001_mask.png", mask_bytes)]:
+                info = tarfile.TarInfo(name=name)
+                info.size = len(payload)
+                tf.addfile(info, io.BytesIO(payload))
+
+        source = HiFiIFDLSource(data_dir=self.test_dir)
+        records = list(source._stream_fashifter_tar(tar_path, limit=5))
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].dataset, "HiFi_IFDL")
+        self.assertEqual(records[0].method, "FaShifter")
+        self.assertEqual(records[0].label, 1)
+        self.assertAlmostEqual(records[0].mask_ratio, 0.25, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()

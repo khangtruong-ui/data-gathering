@@ -208,8 +208,17 @@ class DatasetBuilder:
                 "total_samples": 0,
             }
 
+        prev_target_real = checkpoint.get("target_real", target_real_per_dataset)
+        prev_target_fake = checkpoint.get("target_fake", target_fake_per_dataset)
+        limits_increased = (
+            target_real_per_dataset > prev_target_real
+            or target_fake_per_dataset > prev_target_fake
+        )
+        checkpoint["target_real"] = target_real_per_dataset
+        checkpoint["target_fake"] = target_fake_per_dataset
+
         completed_shards: List[dict] = checkpoint.get("completed_shards", [])
-        source_progress: Dict[str, Dict[str, int]] = checkpoint.get("source_progress", {})
+        source_progress: Dict[str, dict] = checkpoint.get("source_progress", {})
         shard_idx = len(completed_shards)
 
         print(f"Resuming with {shard_idx} completed shards, {checkpoint.get('total_samples', 0)} samples recorded.")
@@ -220,10 +229,11 @@ class DatasetBuilder:
             prog = source_progress.get(s.name, {"real": 0, "fake": 0})
             rem_real = max(0, target_real_per_dataset - prog.get("real", 0))
             rem_fake = max(0, target_fake_per_dataset - prog.get("fake", 0))
-            if rem_real > 0 or rem_fake > 0:
+            already_completed = prog.get("completed", False) and not limits_increased
+            if (rem_real > 0 or rem_fake > 0) and not already_completed:
                 sources_to_run.append((s, rem_real, rem_fake))
             else:
-                print(f"  [{s.name}] Already completed ({prog['real']} real, {prog['fake']} fake). Skipping.")
+                print(f"  [{s.name}] Already completed ({prog.get('real', 0)} real, {prog.get('fake', 0)} fake). Skipping.")
 
         if not sources_to_run:
             print("All requested sources have met their target limits in checkpoint.")
@@ -236,9 +246,9 @@ class DatasetBuilder:
         lock = threading.Lock()
 
         def _worker(source: BaseDatasetSource, needed_real: int, needed_fake: int):
+            curr_real = source_progress.get(source.name, {}).get("real", 0)
+            curr_fake = source_progress.get(source.name, {}).get("fake", 0)
             try:
-                curr_real = source_progress.get(source.name, {}).get("real", 0)
-                curr_fake = source_progress.get(source.name, {}).get("fake", 0)
                 for record in source.stream_records(
                     target_real=needed_real,
                     target_fake=needed_fake,
@@ -249,7 +259,17 @@ class DatasetBuilder:
                             curr_real += 1
                         else:
                             curr_fake += 1
-                        source_progress[source.name] = {"real": curr_real, "fake": curr_fake}
+                        source_progress[source.name] = {
+                            "real": curr_real,
+                            "fake": curr_fake,
+                            "completed": False,
+                        }
+                with lock:
+                    source_progress[source.name] = {
+                        "real": curr_real,
+                        "fake": curr_fake,
+                        "completed": (curr_real > 0 or curr_fake > 0),
+                    }
             except Exception as e:
                 print(f"\n[Worker Error] {source.name}: {e}")
             finally:
@@ -333,6 +353,8 @@ class DatasetBuilder:
                         print(f"  Warning: could not delete {shard_path}: {e}")
 
         executor.shutdown(wait=True)
+        checkpoint["source_progress"] = source_progress
+        self.save_checkpoint(checkpoint)
         total_samples = checkpoint.get("total_samples", 0)
         print(f"\nBuild complete. Total samples across all shards: {total_samples}")
         return [s["path"] for s in completed_shards]

@@ -25,16 +25,9 @@ class AutoSpliceSource(BaseDatasetSource):
         return "AutoSplice"
 
     def _ensure_data_available(self) -> bool:
-        if os.path.exists(self.data_dir) and len(os.listdir(self.data_dir)) > 0:
-            return True
-        try:
-            print(f"[{self.name}] Data not found at '{self.data_dir}'. Triggering automated download...")
-            downloaded = download_dataset("autosplice", target_dir="data")
-            if os.path.exists(downloaded):
-                self.data_dir = downloaded
+        for cand in ["Forged_JPEG100", "Forged_JPEG90", "Forged", "forged", "Authentic", "authentic"]:
+            if os.path.exists(os.path.join(self.data_dir, cand)):
                 return True
-        except Exception as e:
-            print(f"[{self.name}] Automated download failed ({e}).")
         return False
 
     def stream_records(

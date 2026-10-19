@@ -245,6 +245,18 @@ def main():
 
     # 2. Build dataset
     builder = DatasetBuilder(output_dir=args.output_dir, max_disk_gb=args.max_disk_gb)
+    if args.resume and args.mode == "live" and not os.path.exists(builder.get_checkpoint_path()):
+        sync_uploader = uploader or HubUploader(repo_id=args.repo)
+        remote_ckpt = sync_uploader.reconstruct_checkpoint_from_hub(
+            split_name=args.split,
+            output_dir=args.output_dir,
+            target_real=args.limit,
+            target_fake=args.limit,
+            remove_orphaned_shards=bool(args.upload),
+        )
+        if remote_ckpt:
+            builder.save_checkpoint(remote_ckpt)
+
     shard_paths = builder.build_split(
         sources=sources,
         split_name=args.split,
